@@ -81,7 +81,10 @@ async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await document.get_file()
             file_content = await file.download_as_bytearray()
             text = file_content.decode('utf-8')
+            user = update.effective_user
+            await logging_request(user, 'reading_txt')
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
@@ -95,6 +98,8 @@ async def reading_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = file_content.decode('utf-8')
             csv_data = list(csv.reader(text.splitlines()))
             formatted_csv = "\n".join([", ".join(row) for row in csv_data])
+            user = update.effective_user
+            await logging_request(user, 'reading_csv')
             await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_csv)
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
@@ -109,6 +114,8 @@ async def reading_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = file_content.decode('utf-8')
             json_data = json.loads(text)
             formatted_json = json.dumps(json_data, indent=4, ensure_ascii=False)
+            user = update.effective_user
+            await logging_request(user, 'reading_json')
             await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_json)
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
