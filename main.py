@@ -7,12 +7,25 @@ from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import BOT_TOKEN
+from data import db_session
+from data.logging import Logging
+from data.users import User
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def logging_request(user, request):
+    db_sess = db_session.create_session()
+    new_log = Logging(
+        applying_user=user.id,  # ID пользователя
+        request=request  # Имя запроса
+    )
+    db_sess.add(new_log)
+    db_sess.commit()
 
 
 async def reading_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,6 +48,17 @@ async def create_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['state'] = 'menu'
+    db_sess = db_session.create_session()
+    user = update.effective_user
+    if not db_sess.query(User).filter(User.account_id == user.id).first():
+        new_user = User(
+            account_id=user.id,  # ID пользователя
+            nickname=user.username,  # username пользователя (@никнейм)
+            surname=user.last_name,  # фамилия пользователя (если есть)
+            name=user.first_name,  # имя пользователя
+        )
+        db_sess.add(new_user)
+        db_sess.commit()
     text = """
     Здравствуйте 👋! Я — телеграм-бот, предназначенный для работы с файлами.
     Вот перечень моих функций:
@@ -47,6 +71,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text=text, reply_markup=ReplyKeyboardRemove())
+    await logging_request(user, 'help')
 
 
 async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,25 +115,43 @@ async def reading_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def create_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text="Введите данные для CSV файла (каждая строка должна быть разделена запятыми):")
+    await logging_request(user, 'create_csv')
     context.user_data['state'] = 'create_csv'
 
 
 async def create_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text="Введите данные для JSON файла (в формате JSON):")
+    await logging_request(user, 'create_json')
     context.user_data['state'] = 'create_json'
 
 
 async def create_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text="Введите данные для TXT файла:")
+    await logging_request(user, 'create_txt')
     context.user_data['state'] = 'create_txt'
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user = update.effective_user
+    if not context.user_data.get('state') is None:
+        db_sess = db_session.create_session()
+        if not db_sess.query(User).filter(User.account_id == user.id).first():
+            new_user = User(
+                account_id=user.id,  # ID пользователя
+                nickname=user.username,  # username пользователя (@никнейм)
+                surname=user.last_name,  # фамилия пользователя (если есть)
+                name=user.first_name,  # имя пользователя
+            )
+            db_sess.add(new_user)
+            db_sess.commit()
     if context.user_data.get('state') == 'create_csv':
         try:
             data = [row.split(',') for row in text.split('\n')]
@@ -142,6 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
+    db_session.global_init("db/file_bot.db")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     start_handler = CommandHandler(['start', 'help'], help)
     text_converter_handler = CommandHandler('text_converter', reading_files)
