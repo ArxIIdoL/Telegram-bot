@@ -7,9 +7,9 @@ import tempfile
 
 import convertapi
 import fitz
+from PIL import Image
 from telegram import Update, InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from PIL import Image
 
 from config import BOT_TOKEN, CONVERTAPI_SECRET
 from data import db_session
@@ -223,95 +223,116 @@ async def pdf_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
 
-# Требует доработки
-# Нужно добавить в какой формат пользователь хочет перевести свою картинку и определять его формат автоматически
-# Реализовать каждый формат нужно, как отдельную функцию для перевода в свой формат
 async def format_converter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text('Отправьте мне фотографию, и я сконвертирую ее в нужный формат. 📸',
+    await update.message.reply_text('Отправьте мне фотографии, и я сконвертирую их в нужный формат. 📸',
                                     reply_markup=reply_markup)
     context.user_data['state'] = 'format_converter_waiting'
+    context.user_data['photos_to_convert'] = []
 
 
 async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('state') != 'format_converter_waiting':
-        await context.bot.send_message(chat_id=update.effective_chat.id, text='Произошла ошибка')
         return
-
-    if update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
+    photos = update.message.photo
+    if photos:
+        photo_file = await photos[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         file_format = 'jpg'
+        try:
+            Image.open(io.BytesIO(photo_bytes)).verify()
+        except Exception as e:
+            await update.message.reply_text(
+                'Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
+
+        context.user_data['photos_to_convert'].append((photo_bytes, file_format))
     elif update.message.document and update.message.document.mime_type.startswith('image'):
         doc = update.message.document
         photo_file = await context.bot.get_file(doc.file_id)
         photo_bytes = await photo_file.download_as_bytearray()
         file_format = doc.file_name.split('.')[-1].lower()
+
+        try:
+            Image.open(io.BytesIO(photo_bytes)).verify()
+        except Exception as e:
+            await update.message.reply_text('Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
+            return
+
+        context.user_data['photos_to_convert'].append((photo_bytes, file_format))
     else:
-        await update.message.reply_text('Это не изображение. Пожалуйста, отправьте фотографию.')
+        await update.message.reply_text('Это не изображение. Пожалуйста, отправьте фотографию. 🖼️')
         return
-
-    try:
-        Image.open(io.BytesIO(photo_bytes)).verify()
-    except Exception as e:
-        await update.message.reply_text('Не удалось обработать изображение. Пожалуйста, попробуйте другой файл.')
-        return
-
-    context.user_data['photo_bytes'] = photo_bytes
-    context.user_data['file_format'] = file_format
 
     keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text('Фотография принята! ✅ Выберите формат для конвертации:', reply_markup=reply_markup)
-    context.user_data['state'] = 'format_selection'
+    await update.message.reply_text(
+        f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите формат для конвертации:',
+        reply_markup=reply_markup)
 
 
 async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
-    if context.user_data.get('state') != 'format_selection':
-        await context.bot.send_message(chat_id=update.effective_chat.id, text='Произошла ошибка')
-        return
-
-    photo_bytes = context.user_data.get('photo_bytes')
-    file_format = context.user_data.get('file_format')
-    if not photo_bytes:
+    photos_to_convert = context.user_data.get('photos_to_convert', [])
+    if not photos_to_convert:
         await update.message.reply_text('Не найдено изображение для конвертации.')
         return
 
-    temp_file_path = None
-    converted_file_path = None
+    success_count = 0
+    failure_messages = []
 
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_format}') as temp_file:
-            temp_file.write(photo_bytes)
-            temp_file_path = temp_file.name
+    for i, (photo_bytes, file_format) in enumerate(photos_to_convert):
+        temp_file_path = None
+        converted_file_path = None
 
-        converted_file = convertapi.convert(
-            format, {'File': temp_file_path}
-        )
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_format}') as temp_file:
+                temp_file.write(photo_bytes)
+                temp_file_path = temp_file.name
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{format}') as converted_temp_file:
-            converted_file_path = converted_temp_file.name
-            converted_file.save_files(converted_file_path)
-
-        with open(converted_file_path, 'rb') as f:
-            await context.bot.send_document(chat_id=update.effective_chat.id,
-                                            document=InputFile(f, filename=f"converted_image.{format}"),
-                                            reply_markup=ReplyKeyboardRemove())
-
-    except Exception as e:
-        await update.message.reply_text(f'Произошла ошибка при конвертации: {e} 😥')
-    finally:
-        if temp_file_path:
             try:
-                os.remove(temp_file_path)
-            except Exception as e:
-                await update.message.reply_text(f"Ошибка при удалении временного файла: {e}")
-        if converted_file_path:
-            try:
-                os.remove(converted_file_path)
-            except Exception as e:
-                await update.message.reply_text(f"Ошибка при удалении сконвертированного файла: {e}")
+                converted_file = convertapi.convert(
+                    format, {'File': temp_file_path}
+                )
+            except convertapi.exceptions.ApiError as e:
+                failure_messages.append(
+                    f'Не удалось преобразовать фотографию {i + 1}: ConvertAPI не поддерживает конвертацию из {file_format.upper()} в {format.upper()}. 😥')
+                continue
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{format}') as converted_temp_file:
+                converted_file_path = converted_temp_file.name
+                converted_file.save_files(converted_file_path)
+
+            with open(converted_file_path, 'rb') as f:
+                await context.bot.send_document(chat_id=update.effective_chat.id,
+                                                document=InputFile(f, filename=f"converted_image_{i + 1}.{format}"))
+            success_count += 1
+
+        except Exception as e:
+            failure_messages.append(f'Не удалось преобразовать фотографию {i + 1}: {e}')
+        finally:
+            if temp_file_path:
+                try:
+                    os.remove(temp_file_path)
+                except Exception as e:
+                    await update.message.reply_text(f"Ошибка при удалении временного файла: {e}")
+            if converted_file_path:
+                try:
+                    os.remove(converted_file_path)
+                except Exception as e:
+                    await update.message.reply_text(f"Ошибка при удалении сконвертированного файла: {e}")
+
+    if success_count > 0:
+        await update.message.reply_text(f'Успешно преобразовано {success_count} фото.')
+    if failure_messages:
+        for msg in failure_messages:
+            await update.message.reply_text(msg)
+
+    context.user_data['photos_to_convert'] = []
+    context.user_data['state'] = 'format_converter_waiting'
+
+    await update.message.reply_text('Выберите формат для конвертации или отправьте еще фотографии:',
+                                    reply_markup=ReplyKeyboardMarkup(
+                                        [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']], resize_keyboard=True))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,6 +357,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.upper() in ['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG']:
             await photo(update, context, text.lower())
             return
+    if text.upper() in ['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG']:
+        context.user_data['state'] = 'format_selection'
+        await photo(update, context, text.lower())
+        return
 
     if context.user_data.get('state') == 'create_csv':
         try:
@@ -372,13 +397,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
+    db_session.global_init("db/file_bot.db")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler(['start', 'help'], help))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
-
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
     application.add_handler(CommandHandler('create_csv', create_csv))
@@ -386,8 +411,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('create_txt', create_txt))
     application.add_handler(CommandHandler('pdf_merger', pdf_merger))
     application.add_handler(CommandHandler('format_converter', format_converter_start))
-
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.MimeType("image/*"), image_handler))
-
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_handler))
     application.run_polling()
