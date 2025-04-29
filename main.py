@@ -7,9 +7,9 @@ import tempfile
 
 import convertapi
 import fitz
+from PIL import Image
 from telegram import Update, InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from PIL import Image
 
 from config import BOT_TOKEN, CONVERTAPI_SECRET
 from data import db_session
@@ -223,9 +223,6 @@ async def pdf_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
 
-# Требует доработки
-# Нужно добавить в какой формат пользователь хочет перевести свою картинку и определять его формат автоматически
-# Реализовать каждый формат нужно, как отдельную функцию для перевода в свой формат
 async def format_converter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -263,7 +260,8 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text('Фотография принята! ✅ Выберите формат для конвертации:', reply_markup=reply_markup)
+    await update.message.reply_text('Фотография принята! ✅ Выберите формат для конвертации:',
+                                    reply_markup=reply_markup)
     context.user_data['state'] = 'format_selection'
 
 
@@ -298,6 +296,8 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str)
             await context.bot.send_document(chat_id=update.effective_chat.id,
                                             document=InputFile(f, filename=f"converted_image.{format}"),
                                             reply_markup=ReplyKeyboardRemove())
+            user = update.effective_user
+            await logging_request(user, 'format_selection')
 
     except Exception as e:
         await update.message.reply_text(f'Произошла ошибка при конвертации: {e} 😥')
@@ -372,13 +372,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
+    db_session.global_init("db/file_bot.db")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler(['start', 'help'], help))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
-
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
     application.add_handler(CommandHandler('create_csv', create_csv))
@@ -386,8 +386,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('create_txt', create_txt))
     application.add_handler(CommandHandler('pdf_merger', pdf_merger))
     application.add_handler(CommandHandler('format_converter', format_converter_start))
-
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.MimeType("image/*"), image_handler))
-
     application.run_polling()
