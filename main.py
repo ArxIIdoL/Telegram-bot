@@ -7,6 +7,7 @@ import tempfile
 
 import convertapi
 import fitz
+import pandas as pd
 from PIL import Image
 from telegram import Update, InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -67,7 +68,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reading_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['state'] = 'reading_files'
     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="Отправьте файл (.txt, .csv, .json), а я пришлю его вам сообщением!")
+                                   text="Отправьте файл (.txt, .json), а я пришлю его вам сообщением!")
 
 
 async def create_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,20 +110,68 @@ async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
 
+async def csv_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['csv_waiting'] = True
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Отправь мне csv файл, и я дам тебе его преобразить!")
+
+
+CSV_MAX_SIZE_MB, csv_file = 5, None  # Ограничение размера файла в мегабайтах
+
+
 async def reading_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('state') == 'reading_files':
+    if context.user_data.get('csv_waiting'):
+        global csv_file
+        context.user_data['csv_waiting'], context.user_data['state'] = False, 'csv_manipulation'
         document = update.message.document
-        if document.mime_type == 'text/csv':
-            file = await document.get_file()
-            file_content = await file.download_as_bytearray()
-            text = file_content.decode('utf-8')
-            csv_data = list(csv.reader(text.splitlines()))
-            formatted_csv = "\n".join([", ".join(row) for row in csv_data])
+        chat_id = update.effective_chat.id
+
+        if not document:
+            await context.bot.send_message(chat_id=chat_id, text="Файл не обнаружен.")
+            return
+
+        file_obj = await document.get_file()
+        file_size_mb = file_obj.file_size / (1024 * 1024)
+
+        if file_size_mb > CSV_MAX_SIZE_MB:
+            await context.bot.send_message(chat_id=chat_id,
+                                           text=f"Слишком большой файл ({round(file_size_mb)} MB)! "
+                                                f"Максимальный размер файла: {CSV_MAX_SIZE_MB} MB.")
+            return
+
+        temp_file_path = f"{chat_id}_input.csv"
+        await file_obj.download_to_drive(temp_file_path)
+
+        try:
+            csv_file = pd.read_csv(temp_file_path)
+            await context.bot.send_message(chat_id=chat_id, text="Файл успешно прочитан.")
+            await csv_manipulation(update, context)
+        except csv_file.errors.EmptyDataError:
+            await context.bot.send_message(chat_id=chat_id, text="Файл пуст или поврежден.")
+        except csv_file.errors.ParserError:
+            await context.bot.send_message(chat_id=chat_id,
+                                           text="Проблемы с парсингом файла. Возможно, неверный формат CSV.")
+        finally:
+            os.remove(temp_file_path)
             user = update.effective_user
-            await logging_request(user, 'reading_csv')
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_csv)
+            await logging_request(user, 'csv_manipulation')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
+
+
+async def csv_manipulation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['state'] = 'csv_manipulation'
+    keyboard = [
+        ["Выведи первые 10 строк"],
+        ["Выведи первые 20 строк"],
+        ["Выведи первые 30 строк"],
+        ["Выведи последние 10 строк"],
+        ["Выведи последние 20 строк"],
+        ["Выведи последние 30 строк"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Выберите действие:",
+                                   reply_markup=reply_markup)
 
 
 async def reading_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,6 +443,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'menu'
     elif context.user_data.get('state') == 'pdf_merger' and text == "Готово!":
         await merge(update, context)
+    elif context.user_data.get('state') == 'csv_manipulation':
+        global csv_file
+        if text == "Выведи первые 10 строк":
+            first_rows = csv_file.head(10).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+        elif text == "Выведи первые 20 строк":
+            first_rows = csv_file.head(20).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи первые 30 строк":
+            first_rows = csv_file.head(30).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 10 строк":
+            last_rows = csv_file.tail(10).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 20 строк":
+            last_rows = csv_file.tail(20).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 30 строк":
+            last_rows = csv_file.tail(30).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
 
 
 if __name__ == '__main__':
@@ -402,7 +481,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler(['start', 'help'], help))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
-    application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
@@ -411,6 +489,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('create_txt', create_txt))
     application.add_handler(CommandHandler('pdf_merger', pdf_merger))
     application.add_handler(CommandHandler('format_converter', format_converter_start))
+    application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
+    application.add_handler(CommandHandler('csv_manipulation', csv_waiting))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_handler))
     application.run_polling()
