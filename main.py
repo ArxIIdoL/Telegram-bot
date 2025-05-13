@@ -7,6 +7,7 @@ import tempfile
 
 import convertapi
 import fitz
+import pandas as pd
 from PIL import Image
 from telegram import Update, InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -67,7 +68,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reading_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['state'] = 'reading_files'
     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="Отправьте файл (.txt, .csv, .json), а я пришлю его вам сообщением!")
+                                   text="Отправьте файл (.txt, .json), а я пришлю его вам сообщением!")
 
 
 async def create_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,20 +110,68 @@ async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
 
+async def csv_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['csv_waiting'] = True
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Отправь мне csv файл, и я дам тебе его преобразить!")
+
+
+CSV_MAX_SIZE_MB, csv_file = 5, None  # Ограничение размера файла в мегабайтах
+
+
 async def reading_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('state') == 'reading_files':
+    if context.user_data.get('csv_waiting'):
+        global csv_file
+        context.user_data['csv_waiting'], context.user_data['state'] = False, 'csv_manipulation'
         document = update.message.document
-        if document.mime_type == 'text/csv':
-            file = await document.get_file()
-            file_content = await file.download_as_bytearray()
-            text = file_content.decode('utf-8')
-            csv_data = list(csv.reader(text.splitlines()))
-            formatted_csv = "\n".join([", ".join(row) for row in csv_data])
+        chat_id = update.effective_chat.id
+
+        if not document:
+            await context.bot.send_message(chat_id=chat_id, text="Файл не обнаружен.")
+            return
+
+        file_obj = await document.get_file()
+        file_size_mb = file_obj.file_size / (1024 * 1024)
+
+        if file_size_mb > CSV_MAX_SIZE_MB:
+            await context.bot.send_message(chat_id=chat_id,
+                                           text=f"Слишком большой файл ({round(file_size_mb)} MB)! "
+                                                f"Максимальный размер файла: {CSV_MAX_SIZE_MB} MB.")
+            return
+
+        temp_file_path = f"{chat_id}_input.csv"
+        await file_obj.download_to_drive(temp_file_path)
+
+        try:
+            csv_file = pd.read_csv(temp_file_path)
+            await context.bot.send_message(chat_id=chat_id, text="Файл успешно прочитан.")
+            await csv_manipulation(update, context)
+        except csv_file.errors.EmptyDataError:
+            await context.bot.send_message(chat_id=chat_id, text="Файл пуст или поврежден.")
+        except csv_file.errors.ParserError:
+            await context.bot.send_message(chat_id=chat_id,
+                                           text="Проблемы с парсингом файла. Возможно, неверный формат CSV.")
+        finally:
+            os.remove(temp_file_path)
             user = update.effective_user
-            await logging_request(user, 'reading_csv')
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_csv)
+            await logging_request(user, 'csv_manipulation')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
+
+
+async def csv_manipulation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['state'] = 'csv_manipulation'
+    keyboard = [
+        ["Выведи первые 10 строк"],
+        ["Выведи первые 20 строк"],
+        ["Выведи первые 30 строк"],
+        ["Выведи последние 10 строк"],
+        ["Выведи последние 20 строк"],
+        ["Выведи последние 30 строк"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Выберите действие:",
+                                   reply_markup=reply_markup)
 
 
 async def reading_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,13 +261,16 @@ async def merge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pdf_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('state') == 'pdf_merger':
+    current_state = context.user_data.get('state')
+    if current_state == 'pdf_merger':
         global pdf_files
         file_id = update.message.document.file_id
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         pdf_files.append(bytes(file_bytes))
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Файл получен. ✅")
+    elif current_state == 'pdf_images_waiting':
+        await pdf_images_handler(update, context)
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
@@ -335,6 +387,95 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str)
                                         [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']], resize_keyboard=True))
 
 
+async def pdf_images_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [['Готово'], ['Выйти']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text('Отправьте мне PDF-файл(ы), и я извлеку из них изображения.',
+                                    reply_markup=reply_markup)
+    context.user_data['state'] = 'pdf_images_waiting'
+    context.user_data['pdf_files'] = []
+
+
+async def pdf_images_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('state') != 'pdf_images_waiting':
+        print(context.user_data.get('state'))
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
+        return
+    document = update.message.document
+    if document.mime_type == 'application/pdf':
+        file_id = document.file_id
+        file = await context.bot.get_file(file_id)
+        file_bytes = await file.download_as_bytearray()
+        context.user_data['pdf_files'].append(file_bytes)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Файл получен. ✅")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="Это не PDF-файл. Пожалуйста, отправьте PDF-файл. 📄")
+
+
+async def extract_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pdf_files = context.user_data.get('pdf_files', [])
+    if not pdf_files:
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="Нет файлов для обработки. 😔 Отправьте PDF-файлы.",
+                                       reply_markup=ReplyKeyboardRemove())
+        return
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Извлекаю изображения... ⏳",
+                                   reply_markup=ReplyKeyboardRemove())
+    for pdf_file in pdf_files:
+        temp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                temp_file.write(pdf_file)
+                temp_file_path = temp_file.name
+
+            doc = fitz.open(temp_file_path)
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                images = page.get_images(full=True)
+                for img in images:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+
+                    if base_image is None:
+                        continue
+
+                    image_bytes = base_image["image"]
+                    image_ext = base_image["ext"]
+                    image_filename = f"image_{page_num + 1}_{xref}.{image_ext}"
+
+                    with open(image_filename, "wb") as image_file:
+                        image_file.write(image_bytes)
+
+                    with open(image_filename, "rb") as image_file:
+                        await context.bot.send_document(chat_id=update.effective_chat.id, document=image_file)
+
+                    os.remove(image_filename)
+
+            doc.close()
+            os.remove(temp_file_path)
+        except Exception as e:
+            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                           text=f"Произошла ошибка при обработке файла: {e} 😢")
+        finally:
+            if temp_file:
+                try:
+                    os.remove(temp_file.name)
+                except Exception as e:
+                    pass
+
+    context.user_data['pdf_files'] = []
+    # context.user_data['state'] = None
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Извлечение изображений завершено! 📸")
+    keyboard = [['Готово'], ['Выйти']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text('Отправьте мне PDF-файл(ы), и я извлеку из них изображения.',
+                                    reply_markup=reply_markup)
+    context.user_data['state'] = 'pdf_images_waiting'
+    context.user_data['pdf_files'] = []
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.effective_user
@@ -351,7 +492,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_sess.commit()
     if text == 'Выйти':
         context.user_data['state'] = None
-        await update.message.reply_text("Вы вышли из режима конвертации.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("Вы вышли из режима.", reply_markup=ReplyKeyboardRemove())
+        return
+    if text == 'Готово':
+        await extract_images(update, context)
         return
     if context.user_data.get('state') == 'format_selection':
         if text.upper() in ['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG']:
@@ -394,15 +538,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'menu'
     elif context.user_data.get('state') == 'pdf_merger' and text == "Готово!":
         await merge(update, context)
+    elif context.user_data.get('state') == 'csv_manipulation':
+        global csv_file
+        if text == "Выведи первые 10 строк":
+            first_rows = csv_file.head(10).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+        elif text == "Выведи первые 20 строк":
+            first_rows = csv_file.head(20).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи первые 30 строк":
+            first_rows = csv_file.head(30).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{first_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 10 строк":
+            last_rows = csv_file.tail(10).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 20 строк":
+            last_rows = csv_file.tail(20).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
+
+        elif text == "Выведи последние 30 строк":
+            last_rows = csv_file.tail(30).to_string(index=False)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
+                                           parse_mode='HTML')
 
 
 if __name__ == '__main__':
     db_session.global_init("db/file_bot.db")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler('pdf_images', pdf_images_start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CommandHandler(['start', 'help'], help))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
-    application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
@@ -411,6 +586,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('create_txt', create_txt))
     application.add_handler(CommandHandler('pdf_merger', pdf_merger))
     application.add_handler(CommandHandler('format_converter', format_converter_start))
+    application.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), reading_csv))
+    application.add_handler(CommandHandler('csv_manipulation', csv_waiting))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_handler))
     application.run_polling()
