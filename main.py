@@ -8,7 +8,7 @@ import tempfile
 import convertapi
 import fitz
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 from telegram import Update, InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -285,10 +285,15 @@ async def format_converter_start(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('state') != 'format_converter_waiting':
+    if not (context.user_data.get('state') == 'format_converter_waiting' or
+            context.user_data.get('state') == 'image_filter_waiting'):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
         return
     photos = update.message.photo
     if photos:
+        if len(photos) > 5:
+            await update.message.reply_text("⚠️ Можно обработать не более 5 изображений за раз!")
+            return
         photo_file = await photos[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         file_format = 'jpg'
@@ -297,8 +302,10 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(
                 'Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
-
-        context.user_data['photos_to_convert'].append((photo_bytes, file_format))
+        if context.user_data.get('state') == 'format_converter_waiting':
+            context.user_data['photos_to_convert'].append((photo_bytes, file_format))
+        elif context.user_data.get('state') == 'image_filter_waiting':
+            context.user_data['photos_to_filter'].append((photo_bytes, file_format))
     elif update.message.document and update.message.document.mime_type.startswith('image'):
         doc = update.message.document
         photo_file = await context.bot.get_file(doc.file_id)
@@ -310,20 +317,42 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text('Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
             return
-
-        context.user_data['photos_to_convert'].append((photo_bytes, file_format))
+        if context.user_data.get('state') == 'format_converter_waiting':
+            context.user_data['photos_to_convert'].append((photo_bytes, file_format))
+        elif context.user_data.get('state') == 'image_filter_waiting':
+            context.user_data['photos_to_filter'].append((photo_bytes, file_format))
     else:
         await update.message.reply_text('Это не изображение. Пожалуйста, отправьте фотографию. 🖼️')
         return
 
-    keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
+    if context.user_data.get('state') == 'format_converter_waiting':
+        keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите формат для конвертации:',
+            reply_markup=reply_markup)
+    elif context.user_data.get('state') == 'image_filter_waiting':
+        keyboard = [['Чёрно-белый', 'Винтаж',
+                     'Негатив', 'Размытие',
+                     'Карандашный набросок',
+                     'Тёплый свет', 'Холодный свет'], ['Выйти']]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        context.user_data['state'] = 'image_filter_waiting'
+        await update.message.reply_text(
+            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите фильтр:',
+            reply_markup=reply_markup)
+
+
+async def start_image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите формат для конвертации:',
-        reply_markup=reply_markup)
+    await update.message.reply_text('Отправьте мне фотографии, и я изменю их с помощью нужного фильтра. 📸',
+                                    reply_markup=reply_markup)
+    context.user_data['state'] = 'image_filter_waiting'
+    context.user_data['photos_to_filter'] = []
 
 
-async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
+async def convert_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
     photos_to_convert = context.user_data.get('photos_to_convert', [])
     if not photos_to_convert:
         await update.message.reply_text('Не найдено изображение для конвертации.')
@@ -387,6 +416,101 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str)
                                         [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']], resize_keyboard=True))
 
 
+async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
+    # Вспомогательные функции для эффектов
+    def apply_vintage_effect(img):
+        """Применяет винтажный эффект к изображению"""
+        converter = ImageEnhance.Color(img)
+        img = converter.enhance(0.5)
+        sepia = img.convert("RGB")
+        width, height = img.size
+        pixels = sepia.load()
+        for py in range(height):
+            for px in range(width):
+                r, g, b = sepia.getpixel((px, py))
+                tr = int(0.393 * r + 0.769 * g + 0.189 * b)
+                tg = int(0.349 * r + 0.686 * g + 0.168 * b)
+                tb = int(0.272 * r + 0.534 * g + 0.131 * b)
+                pixels[px, py] = (min(tr, 255), min(tg, 255), min(tb, 255))
+        return sepia
+
+    def apply_pencil_sketch(img):
+        """Преобразует изображение в карандашный набросок"""
+        gray_img = img.convert('L')
+        inverted_img = ImageOps.invert(gray_img)
+        blurred_img = inverted_img.filter(ImageFilter.GaussianBlur(radius=3))
+        return ImageOps.invert(blurred_img)
+
+    def apply_warm_light(img):
+        """Добавляет теплый свет (желтоватый оттенок)"""
+        r, g, b = img.split()
+        r = r.point(lambda i: min(255, int(i * 1.2)))
+        g = g.point(lambda i: min(255, int(i * 1.1)))
+        return Image.merge('RGB', (r, g, b))
+
+    def apply_cold_light(img):
+        """Добавляет холодный свет (голубоватый оттенок)"""
+        r, g, b = img.split()
+        g = g.point(lambda i: min(255, int(i * 1.1)))
+        b = b.point(lambda i: min(255, int(i * 1.2)))
+        return Image.merge('RGB', (r, g, b))
+
+    photos_to_use_filter = context.user_data.get('photos_to_filter', [])
+    if not photos_to_use_filter:
+        await update.message.reply_text('Не найдено изображение для конвертации.')
+        return
+
+    success_count = 0
+    failure_messages = []
+    user = update.effective_user
+
+    for i, (photo_bytes, file_format) in enumerate(photos_to_use_filter):
+        try:
+            # Обрабатываем изображение в памяти
+            with Image.open(io.BytesIO(photo_bytes)) as img:
+                # Применяем выбранный фильтр
+                if format == 'Чёрно-белый':
+                    processed_img = img.convert('L')
+                    await logging_request(user, 'filter_bw_apply')
+                elif format == 'Винтаж':
+                    processed_img = apply_vintage_effect(img)
+                    await logging_request(user, 'filter_vintage_apply')
+                elif format == 'Негатив':
+                    processed_img = ImageOps.invert(img.convert('RGB'))
+                    await logging_request(user, 'filter_negative_apply')
+                elif format == 'Размытие':
+                    processed_img = img.filter(ImageFilter.BLUR)
+                    await logging_request(user, 'filter_blur_apply')
+                elif format == 'Карандашный набросок':
+                    processed_img = apply_pencil_sketch(img)
+                    await logging_request(user, 'filter_sketch_apply')
+                elif format == 'Тёплый свет':
+                    processed_img = apply_warm_light(img)
+                    await logging_request(user, 'filter_warm_apply')
+                elif format == 'Холодный свет':
+                    processed_img = apply_cold_light(img)
+                    await logging_request(user, 'filter_cold_apply')
+
+                # Сохраняем в бинарный поток
+                output = io.BytesIO()
+                processed_img.save(output, format='JPEG' if file_format.lower() == 'jpg' else file_format.upper())
+                output.seek(0)
+
+                # Отправляем обработанное изображение
+                await update.message.reply_photo(photo=output)
+                success_count += 1
+
+        except Exception as e:
+            failure_messages.append(f"Ошибка при обработке фото {i + 1}: {str(e)}")
+
+    if success_count > 0:
+        await update.message.reply_text(f'Успешно преобразовано {success_count} фото.')
+    if failure_messages:
+        for msg in failure_messages:
+            await update.message.reply_text(msg)
+    context.user_data['state'] = 'image_filter_waiting'
+
+
 async def pdf_images_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['Готово'], ['Выйти']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -398,7 +522,6 @@ async def pdf_images_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pdf_images_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('state') != 'pdf_images_waiting':
-        print(context.user_data.get('state'))
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
         return
     document = update.message.document
@@ -423,6 +546,8 @@ async def extract_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Извлекаю изображения... ⏳",
                                    reply_markup=ReplyKeyboardRemove())
+    user = update.effective_user
+    await logging_request(user, 'pdf_images')
     for pdf_file in pdf_files:
         temp_file = None
         try:
@@ -479,6 +604,8 @@ async def extract_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.effective_user
+    if context.user_data.get('state') != 'image_filter_waiting':
+        context.user_data['photos_to_filter'] = []
     if not context.user_data.get('state') is None:
         db_sess = db_session.create_session()
         if not db_sess.query(User).filter(User.account_id == user.id).first():
@@ -492,6 +619,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_sess.commit()
     if text == 'Выйти':
         context.user_data['state'] = None
+        context.user_data['photos_to_filter'] = []
         await update.message.reply_text("Вы вышли из режима.", reply_markup=ReplyKeyboardRemove())
         return
     if text == 'Готово':
@@ -499,14 +627,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if context.user_data.get('state') == 'format_selection':
         if text.upper() in ['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG']:
-            await photo(update, context, text.lower())
+            await convert_photo(update, context, text.lower())
             return
     if text.upper() in ['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG']:
         context.user_data['state'] = 'format_selection'
-        await photo(update, context, text.lower())
+        await convert_photo(update, context, text.lower())
         return
 
     if context.user_data.get('state') == 'create_csv':
+        await logging_request(user, 'create_csv')
         try:
             data = [row.split(',') for row in text.split('\n')]
             with open('output.csv', 'w', newline='') as file:
@@ -519,6 +648,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Неправильный формат данных.")
     elif context.user_data.get('state') == 'create_json':
+        await logging_request(user, 'create_json')
         try:
             json_data = json.loads(text)
             with open('output.json', 'w') as file:
@@ -530,6 +660,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except json.JSONDecodeError:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Неправильный формат данных.")
     elif context.user_data.get('state') == 'create_txt':
+        await logging_request(user, 'create_txt')
         with open('output.txt', 'w') as file:
             file.write(text)
         with open('output.txt', 'rb') as file:
@@ -569,6 +700,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<pre>{last_rows}</pre>",
                                            parse_mode='HTML')
 
+    elif context.user_data.get('state') == 'image_filter_waiting' and text in ['Чёрно-белый', 'Винтаж',
+                                                                       'Негатив', 'Размытие',
+                                                                       'Карандашный набросок',
+                                                                       'Тёплый свет', 'Холодный свет']:
+        await image_filter(update, context, text)
+
 
 if __name__ == '__main__':
     db_session.global_init("db/file_bot.db")
@@ -579,6 +716,9 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
+
+    application.add_handler(CommandHandler('image_filter', start_image_filter))
+
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
     application.add_handler(CommandHandler('create_csv', create_csv))
