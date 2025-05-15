@@ -1,7 +1,6 @@
 import csv
 import io
 import json
-import logging
 import os
 import tempfile
 
@@ -20,11 +19,12 @@ from data.users import User
 convertapi.api_credentials = CONVERTAPI_SECRET
 pdf_files = []
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
-)
 
-logger = logging.getLogger(__name__)
+# logging.basicConfig(
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
+# )
+#
+# logger = logging.getLogger(__name__)
 
 
 async def logging_request(user, request):
@@ -68,7 +68,8 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reading_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['state'] = 'reading_files'
     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="Отправьте файл (.txt, .json), а я пришлю его вам сообщением!")
+                                   text="Отправьте файл (.txt, .json), а я пришлю его вам сообщением!",
+                                   reply_markup=ReplyKeyboardRemove())
 
 
 async def create_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +114,8 @@ async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def csv_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['csv_waiting'] = True
     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="Отправь мне csv файл, и я дам тебе его преобразить!")
+                                   text="Отправь мне csv файл, и я дам тебе его преобразить!",
+                                   reply_markup=ReplyKeyboardRemove())
 
 
 CSV_MAX_SIZE_MB, csv_file = 5, None  # Ограничение размера файла в мегабайтах
@@ -282,7 +284,6 @@ async def format_converter_start(update: Update, context: ContextTypes.DEFAULT_T
                                     reply_markup=reply_markup)
     context.user_data['state'] = 'format_converter_waiting'
     context.user_data['photos_to_convert'] = []
-    context.user_data['image_count'] = 0
 
 
 async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,20 +291,16 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get('state') == 'image_filter_waiting'):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
         return
-
-
-    if context.user_data.get('image_count', 0) >= 5:
+    if (len(context.user_data.get('photos_to_filter', [])) >= 5 or
+            len(context.user_data.get('photos_to_convert', [])) >= 5):
         await update.message.reply_text("⚠️ Вы уже отправили максимальное количество изображений (5)!")
         return
 
     photos = update.message.photo
     if photos:
-        photo_bytes = None
         file_format = 'jpg'
-
         photo_file = await photos[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-
         try:
             Image.open(io.BytesIO(photo_bytes)).verify()
         except Exception as e:
@@ -315,8 +312,6 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['photos_to_convert'].append((photo_bytes, file_format))
         elif context.user_data.get('state') == 'image_filter_waiting':
             context.user_data['photos_to_filter'].append((photo_bytes, file_format))
-
-        context.user_data['image_count'] += 1
 
     elif update.message.document and update.message.document.mime_type.startswith('image'):
         doc = update.message.document
@@ -333,15 +328,14 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get('state') == 'format_converter_waiting':
             context.user_data['photos_to_convert'].append((photo_bytes, file_format))
         elif context.user_data.get('state') == 'image_filter_waiting':
-            context.user_data['photos_to_filter'].append((photo_bytes, file_format))
-
-        context.user_data['image_count'] += 1
-
+            context.user_data['photos_to_filter'].append(photo_bytes)
     else:
         await update.message.reply_text('Это не изображение. Пожалуйста, отправьте фотографию. 🖼️')
         return
-
-    remaining = 5 - context.user_data.get('image_count', 0)
+    if context.user_data.get('state') == 'format_converter_waiting':
+        remaining = 5 - len(context.user_data.get('photos_to_convert', []))
+    else:
+        remaining = 5 - len(context.user_data.get('photos_to_filter', []))
     if context.user_data.get('state') == 'format_converter_waiting':
         keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -367,7 +361,6 @@ async def start_image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                     reply_markup=reply_markup)
     context.user_data['state'] = 'image_filter_waiting'
     context.user_data['photos_to_filter'] = []
-    context.user_data['image_count'] = 0
 
 
 async def convert_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
@@ -425,15 +418,13 @@ async def convert_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, form
     if failure_messages:
         for msg in failure_messages:
             await update.message.reply_text(msg)
-
-    context.user_data['photos_to_convert'] = []
+    if not failure_messages:
+        context.user_data['photos_to_convert'] = []
     context.user_data['state'] = 'format_converter_waiting'
 
     await update.message.reply_text('Отправьте мне фотографии, и я сконвертирую их в нужный формат. 📸',
                                     reply_markup=ReplyKeyboardMarkup(
                                         [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']], resize_keyboard=True))
-    context.user_data['image_count'] = 0
-
 
 
 async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
@@ -483,9 +474,11 @@ async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, forma
     success_count = 0
     failure_messages = []
     user = update.effective_user
-
     for i, (photo_bytes, file_format) in enumerate(photos_to_use_filter):
         try:
+            if success_count >= 5:
+                await update.message.reply_text("⚠️ Вы уже отправили максимальное количество изображений (5)!")
+                break
             # Обрабатываем изображение в памяти
             with Image.open(io.BytesIO(photo_bytes)) as img:
                 # Применяем выбранный фильтр
@@ -529,7 +522,6 @@ async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, forma
         for msg in failure_messages:
             await update.message.reply_text(msg)
     context.user_data['state'] = 'image_filter_waiting'
-    context.user_data['image_count'] = 0
 
 
 async def pdf_images_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -625,6 +617,8 @@ async def extract_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.effective_user
+    if context.user_data.get('state') is None:
+        context.user_data['photos_to_filter'] = []
     if context.user_data.get('state') != 'image_filter_waiting':
         context.user_data['photos_to_filter'] = []
     if not context.user_data.get('state') is None:
