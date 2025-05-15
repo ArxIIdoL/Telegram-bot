@@ -529,6 +529,7 @@ async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, forma
         for msg in failure_messages:
             await update.message.reply_text(msg)
     context.user_data['state'] = 'image_filter_waiting'
+    context.user_data['image_count'] = 0
 
 
 async def pdf_images_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
