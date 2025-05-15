@@ -282,6 +282,7 @@ async def format_converter_start(update: Update, context: ContextTypes.DEFAULT_T
                                     reply_markup=reply_markup)
     context.user_data['state'] = 'format_converter_waiting'
     context.user_data['photos_to_convert'] = []
+    context.user_data['image_count'] = 0
 
 
 async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,23 +290,34 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get('state') == 'image_filter_waiting'):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
         return
+
+
+    if context.user_data.get('image_count', 0) >= 5:
+        await update.message.reply_text("⚠️ Вы уже отправили максимальное количество изображений (5)!")
+        return
+
     photos = update.message.photo
     if photos:
-        if len(photos) > 5:
-            await update.message.reply_text("⚠️ Можно обработать не более 5 изображений за раз!")
-            return
+        photo_bytes = None
+        file_format = 'jpg'
+
         photo_file = await photos[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        file_format = 'jpg'
+
         try:
             Image.open(io.BytesIO(photo_bytes)).verify()
         except Exception as e:
             await update.message.reply_text(
                 'Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
+            return
+
         if context.user_data.get('state') == 'format_converter_waiting':
             context.user_data['photos_to_convert'].append((photo_bytes, file_format))
         elif context.user_data.get('state') == 'image_filter_waiting':
             context.user_data['photos_to_filter'].append((photo_bytes, file_format))
+
+        context.user_data['image_count'] += 1
+
     elif update.message.document and update.message.document.mime_type.startswith('image'):
         doc = update.message.document
         photo_file = await context.bot.get_file(doc.file_id)
@@ -317,19 +329,24 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text('Не удалось обработать изображение. Пожалуйста, попробуйте другой файл. 😥')
             return
+
         if context.user_data.get('state') == 'format_converter_waiting':
             context.user_data['photos_to_convert'].append((photo_bytes, file_format))
         elif context.user_data.get('state') == 'image_filter_waiting':
             context.user_data['photos_to_filter'].append((photo_bytes, file_format))
+
+        context.user_data['image_count'] += 1
+
     else:
         await update.message.reply_text('Это не изображение. Пожалуйста, отправьте фотографию. 🖼️')
         return
 
+    remaining = 5 - context.user_data.get('image_count', 0)
     if context.user_data.get('state') == 'format_converter_waiting':
         keyboard = [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите формат для конвертации:',
+            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии (осталось {remaining}) или выберите формат для конвертации:',
             reply_markup=reply_markup)
     elif context.user_data.get('state') == 'image_filter_waiting':
         keyboard = [['Чёрно-белый', 'Винтаж',
@@ -339,7 +356,7 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         context.user_data['state'] = 'image_filter_waiting'
         await update.message.reply_text(
-            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии или выберите фильтр:',
+            f'Фотографии добавлены в очередь! ✅ Отправьте еще фотографии (осталось {remaining}) или выберите фильтр:',
             reply_markup=reply_markup)
 
 
@@ -350,6 +367,7 @@ async def start_image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                     reply_markup=reply_markup)
     context.user_data['state'] = 'image_filter_waiting'
     context.user_data['photos_to_filter'] = []
+    context.user_data['image_count'] = 0
 
 
 async def convert_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
@@ -411,9 +429,11 @@ async def convert_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, form
     context.user_data['photos_to_convert'] = []
     context.user_data['state'] = 'format_converter_waiting'
 
-    await update.message.reply_text('Выберите формат для конвертации или отправьте еще фотографии:',
+    await update.message.reply_text('Отправьте мне фотографии, и я сконвертирую их в нужный формат. 📸',
                                     reply_markup=ReplyKeyboardMarkup(
                                         [['PNG', 'JPEG', 'WEBP', 'TIFF', 'SVG'], ['Выйти']], resize_keyboard=True))
+    context.user_data['image_count'] = 0
+
 
 
 async def image_filter(update: Update, context: ContextTypes.DEFAULT_TYPE, format: str):
@@ -701,9 +721,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            parse_mode='HTML')
 
     elif context.user_data.get('state') == 'image_filter_waiting' and text in ['Чёрно-белый', 'Винтаж',
-                                                                       'Негатив', 'Размытие',
-                                                                       'Карандашный набросок',
-                                                                       'Тёплый свет', 'Холодный свет']:
+                                                                               'Негатив', 'Размытие',
+                                                                               'Карандашный набросок',
+                                                                               'Тёплый свет', 'Холодный свет']:
         await image_filter(update, context, text)
 
 
