@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import logging
 import os
 import tempfile
 
@@ -19,12 +20,11 @@ from data.users import User
 convertapi.api_credentials = CONVERTAPI_SECRET
 pdf_files = []
 
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
+)
 
-# logging.basicConfig(
-#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
-# )
-#
-# logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 async def logging_request(user, request):
@@ -98,14 +98,18 @@ async def pdf_merger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reading_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('state') == 'reading_files':
-        document = update.message.document
-        if document.mime_type == 'text/plain':
-            file = await document.get_file()
-            file_content = await file.download_as_bytearray()
-            text = file_content.decode('utf-8')
-            user = update.effective_user
-            await logging_request(user, 'reading_txt')
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        try:
+            document = update.message.document
+            if document.mime_type == 'text/plain':
+                file = await document.get_file()
+                file_content = await file.download_as_bytearray()
+                text = file_content.decode('utf-8')
+                user = update.effective_user
+                await logging_request(user, 'reading_txt')
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        except Exception:
+            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                           text="Ошибка при выводе файла! (Возможно файл слишком большой)")
 
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
@@ -178,16 +182,20 @@ async def csv_manipulation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reading_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('state') == 'reading_files':
-        document = update.message.document
-        if document.mime_type == 'application/json':
-            file = await document.get_file()
-            file_content = await file.download_as_bytearray()
-            text = file_content.decode('utf-8')
-            json_data = json.loads(text)
-            formatted_json = json.dumps(json_data, indent=4, ensure_ascii=False)
-            user = update.effective_user
-            await logging_request(user, 'reading_json')
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_json)
+        try:
+            document = update.message.document
+            if document.mime_type == 'application/json':
+                file = await document.get_file()
+                file_content = await file.download_as_bytearray()
+                text = file_content.decode('utf-8')
+                json_data = json.loads(text)
+                formatted_json = json.dumps(json_data, indent=4, ensure_ascii=False)
+                user = update.effective_user
+                await logging_request(user, 'reading_json')
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=formatted_json)
+        except Exception:
+            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                           text="Ошибка при выводе файла! (Возможно файл слишком большой)")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала нужно выбрать режим!")
 
@@ -731,9 +739,7 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.Document.MimeType("application/pdf"), pdf_handler))
     application.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), reading_txt))
     application.add_handler(MessageHandler(filters.Document.MimeType("application/json"), reading_json))
-
     application.add_handler(CommandHandler('image_filter', start_image_filter))
-
     application.add_handler(CommandHandler('text_converter', reading_files))
     application.add_handler(CommandHandler('file_creator', create_files))
     application.add_handler(CommandHandler('create_csv', create_csv))
